@@ -1,0 +1,173 @@
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body for DS12345 PrivTag with BLE.
+ *                   This application integrates the I2C and accelerometer drivers
+ *                   with BLE functionality (using BlueNRG-MS) to announce when the
+ *                   tag has been dropped (i.e. remains static for one minute).
+ *
+ * When the tag is not dropped (i.e. it is moving), the tag remains non-connectable.
+ * When no movement is detected for one minute, the tag enters lost mode: it becomes
+ * connectable and every 10 seconds sends a message over the BLE virtual UART of the form:
+ * "PrivTag DS12345 has been missing for <N> seconds"
+ *
+ * Note:
+ *   - The last four digits of the tag name are hard-coded as "DS12345".
+ *   - This project uses the I2C driver and LSM6DSL accelerometer driver integrated
+ *     from previous steps.
+ *   - BLE functions (from ble.h/ble.c) are used to manage connection and transmit data.
+ *
+ ******************************************************************************
+ */
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stm32l475xx.h>
+
+/* Peripheral drivers */
+#include "leds.h"
+#include "timer.h"
+#include "i2c.h"
+#include "lsm6dsl.h"
+#include "ble.h"  // BLE functions and definitions from ble.c/ble.h
+
+/* ------------------ Lost Mode Detection Parameters ------------------ */
+#define MOVEMENT_THRESHOLD    1200    // Maximum change in any axis to consider the device static
+#define LOST_MODE_THRESHOLD   600     // 600 consecutive static samples (~1 minute at ~100ms per sample)
+#define MESSAGE_INTERVAL_COUNT 100    // 100 iterations ~10 seconds (if each loop ~100ms)
+
+/* ------------------ Global Variables for Movement & Timing ------------------ */
+uint32_t static_count = 0;            // Counts consecutive static samples
+volatile uint8_t lost_mode = 0;       // 0: normal mode, 1: lost mode
+uint32_t message_timer = 0;           // Counts iterations for BLE message interval
+uint32_t lost_seconds = 0;            // Total seconds lost
+
+// Accelerometer readings
+int16_t ax, ay, az;                   // Current readings
+int16_t prev_ax, prev_ay, prev_az;      // Previous readings
+
+/* ------------------ BLE Message Parameters ------------------ */
+#define TAG_NAME "DS12345"            // Tag name (last digits of PID) – also mention this in README.md
+
+/**
+ * @brief Sends a BLE message over the virtual UART.
+ * The message format is:
+ *   "PrivTag <TAG_NAME> has been missing for <N> seconds"
+ *
+ * Uses the BLE updateCharValue() function to send the string.
+ */
+void sendBleMessage(uint32_t secondsMissing)
+{
+    char message[64];
+    // Compose the message. If too long, you may choose to shorten it.
+    snprintf(message, sizeof(message), "PrivTag %s has been missing for %lu seconds", TAG_NAME, secondsMissing);
+
+    // Send the message over BLE.
+    // We assume that ble_init() has already configured the BLE UART service and that
+    // the characteristic handles (e.g., NORDIC_UART_SERVICE_HANDLE and READ_CHAR_HANDLE)
+    // are available for updating.
+    updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, strlen(message), (uint8_t *)message);
+
+    printf("BLE Message sent: %s\n", message);
+}
+
+/**
+ * @brief Main function.
+ * Initializes peripherals, checks for movement using the LSM6DSL accelerometer,
+ * and manages BLE connectivity and messaging in lost mode.
+ */
+int main(void)
+{
+    /* ------------------ Peripheral Initialization ------------------ */
+    leds_init();             // Initialize LED hardware (for fallback or debugging)
+    timer_init(TIM2);        // Initialize TIM2 for periodic tasks (if needed)
+    timer_set_ms(TIM2, 50);  // Set TIM2 period to 50 ms (not used for BLE messaging here)
+    i2c_init();              // Initialize I2C (for accelerometer)
+    lsm6dsl_init();          // Initialize the LSM6DSL accelerometer
+    ble_init();              // Initialize BLE module
+
+    // Initially, ensure the tag is non-connectable.
+    // (Assume that BLE remains non-discoverable until setConnectable() is called.)
+
+    // Get an initial accelerometer reading.
+    lsm6dsl_read_xyz(&prev_ax, &prev_ay, &prev_az);
+
+    printf("DS12345 PrivTag started. Monitoring movement...\n");
+
+    /* ------------------ Main Loop: Movement Detection & BLE Messaging ------------------ */
+    while (1)
+    {
+        // Read current accelerometer data.
+        lsm6dsl_read_xyz(&ax, &ay, &az);
+
+        // Compute absolute differences between successive readings.
+        int diff_x = (ax >= prev_ax) ? (ax - prev_ax) : (prev_ax - ax);
+        int diff_y = (ay >= prev_ay) ? (ay - prev_ay) : (prev_ay - ay);
+        int diff_z = (az >= prev_az) ? (az - prev_az) : (prev_az - az);
+
+        // Check if the device is static.
+        if (diff_x < MOVEMENT_THRESHOLD &&
+            diff_y < MOVEMENT_THRESHOLD &&
+            diff_z < MOVEMENT_THRESHOLD)
+        {
+            static_count++;
+        }
+        else
+        {
+            static_count = 0;  // Reset if movement is detected.
+            // Also, if movement resumes, reset lost mode and BLE state.
+            if (lost_mode)
+            {
+                lost_mode = 0;
+                message_timer = 0;
+                lost_seconds = 0;
+                // Optionally, disconnect BLE if currently connected.
+                disconnectBLE();
+                printf("Movement detected: Exiting lost mode.\n");
+            }
+        }
+
+        // Check if the device has been static long enough to enter lost mode.
+        if (static_count >= LOST_MODE_THRESHOLD)
+        {
+            if (!lost_mode)
+            {
+                // Enter lost mode.
+                lost_mode = 1;
+                // Make BLE connectable.
+                setConnectable();
+                printf("Lost mode triggered: Tag is static for 1 minute. BLE is now connectable.\n");
+            }
+        }
+
+        // If in lost mode, handle BLE messaging.
+        if (lost_mode)
+        {
+            message_timer++;
+            // Every MESSAGE_INTERVAL_COUNT iterations (~10 seconds), send BLE message.
+            if (message_timer >= MESSAGE_INTERVAL_COUNT)
+            {
+                lost_seconds += 10;  // Increment lost time by 10 seconds.
+                sendBleMessage(lost_seconds);
+                message_timer = 0;
+            }
+        }
+
+        // Update previous accelerometer readings.
+        prev_ax = ax;
+        prev_ay = ay;
+        prev_az = az;
+
+        // Optional debug output.
+        printf("Accel: X=%d, Y=%d, Z=%d, static_count=%lu, lost_mode=%d, lost_seconds=%lu\n",
+               ax, ay, az, static_count, lost_mode, lost_seconds);
+
+        // Delay between samples.
+        // Adjust this delay so that each loop iteration approximates 100ms.
+        for (volatile int i = 0; i < 500000; i++);
+    }
+
+    return 0;
+}

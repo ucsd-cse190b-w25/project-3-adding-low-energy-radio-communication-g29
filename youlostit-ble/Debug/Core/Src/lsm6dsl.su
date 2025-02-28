@@ -1,0 +1,4 @@
+../Core/Src/lsm6dsl.c:14:16:lsm6dsl_write_reg	24	static
+../Core/Src/lsm6dsl.c:23:16:lsm6dsl_read_reg	24	static
+../Core/Src/lsm6dsl.c:34:6:lsm6dsl_init	16	static
+../Core/Src/lsm6dsl.c:79:6:lsm6dsl_read_xyz	40	static

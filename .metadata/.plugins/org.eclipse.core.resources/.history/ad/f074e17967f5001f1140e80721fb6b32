@@ -1,0 +1,154 @@
+/*
+   IMPORTANT: Exclude or disable the main() function in ble.c
+   so that only this main() is linked.
+*/
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "ble.h"      // Provides ble_init(), setDiscoverability(), setConnectable(),
+                      // updateCharValue(), catchBLE(), and BLE service handles.
+#include "i2c.h"      // I2C driver for the LSM6DSL accelerometer.
+#include "lsm6dsl.h"  // Accelerometer driver.
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/*
+   We do not define hspi3 or other globals here because they are defined in ble.c.
+   Instead, we declare them as extern.
+*/
+extern SPI_HandleTypeDef hspi3;         // Provided in ble.c
+extern uint32_t staticDuration;         // Accumulated static time (ms)
+extern uint32_t lostStartTime;          // Time (ms) when lost mode was entered
+extern uint32_t lastBLEMessageTime;     // Timestamp of last BLE message
+extern uint32_t lastSampleTime;         // Timestamp of last accelerometer sample
+extern int16_t prev_x, prev_y, prev_z;    // Previous accelerometer readings
+extern int16_t x, y, z;                 // Current accelerometer readings
+extern uint8_t lost_mode;               // 0 = normal (moving), 1 = lost (static)
+
+/* Define our local lost-mode detection constants */
+#define MOVEMENT_THRESHOLD   1200     // Maximum change to be considered static
+#define LOST_MODE_TIMEOUT    60000    // 60,000 ms (1 minute) static triggers lost mode
+#define BLE_MESSAGE_INTERVAL 10000    // Every 10,000 ms (10 seconds) send a BLE message
+
+/* (BLE service handles are defined in ble.c and declared in ble.h) */
+extern uint8_t NORDIC_UART_SERVICE_HANDLE[2];
+extern uint8_t READ_CHAR_HANDLE[2];
+
+/*
+   IMPORTANT: Do not redefine _write, SystemClock_Config, or Error_Handler here
+   if they are already defined in ble.c. (Ensure that only one copy exists.)
+*/
+
+/*
+   Our integration logic for motion detection and BLE messaging will be part of main().
+   (Ensure that ble.c’s main() is excluded from the build so that this main() is the only one.)
+*/
+
+int main(void)
+{
+  /* MCU Initialization (CubeMX-generated) */
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_SPI3_Init();
+
+  /* --- BLE Initialization --- */
+  /* Reset BLE module */
+  HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+  ble_init();
+  HAL_Delay(10);
+
+  /* Initially, keep BLE non-discoverable */
+  setDiscoverability(0);
+
+  /* --- I2C and Accelerometer Initialization --- */
+  i2c_init();
+  lsm6dsl_init();
+
+  /* Get an initial accelerometer reading */
+  lsm6dsl_read_xyz(&prev_x, &prev_y, &prev_z);
+  lastSampleTime = HAL_GetTick();
+
+  printf("DS12345 PrivTag started. Monitoring movement...\n");
+
+  /* Main loop */
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
+
+    /* Sample accelerometer roughly every 100 ms */
+    if (now - lastSampleTime >= 100)
+    {
+      lastSampleTime = now;
+      lsm6dsl_read_xyz(&x, &y, &z);
+
+      /* Compute absolute differences between current and previous readings */
+      int diff_x = (x >= prev_x) ? (x - prev_x) : (prev_x - x);
+      int diff_y = (y >= prev_y) ? (y - prev_y) : (prev_y - y);
+      int diff_z = (z >= prev_z) ? (z - prev_z) : (prev_z - z);
+
+      /* If differences are below threshold, accumulate static time */
+      if (diff_x < MOVEMENT_THRESHOLD &&
+          diff_y < MOVEMENT_THRESHOLD &&
+          diff_z < MOVEMENT_THRESHOLD)
+      {
+        staticDuration += 100;
+      }
+      else
+      {
+        staticDuration = 0;
+        if (lost_mode) {
+          /* Movement detected – exit lost mode */
+          lost_mode = 0;
+          setDiscoverability(0);  // Return BLE to non-discoverable state
+          printf("Movement detected. Exiting lost mode.\n");
+        }
+      }
+
+      /* Update previous readings */
+      prev_x = x;
+      prev_y = y;
+      prev_z = z;
+
+      /* Check if static duration has reached timeout */
+      if (!lost_mode && staticDuration >= LOST_MODE_TIMEOUT)
+      {
+        lost_mode = 1;
+        lostStartTime = now;
+        lastBLEMessageTime = now;
+        setConnectable();  // Make the tag connectable via BLE
+        printf("Lost mode activated.\n");
+      }
+    }
+
+    /* In lost mode, send a BLE message every 10 seconds */
+    if (lost_mode && (now - lastBLEMessageTime >= BLE_MESSAGE_INTERVAL))
+    {
+      lastBLEMessageTime = now;
+      uint32_t lostSeconds = (now - lostStartTime) / 1000;
+      char msg[64];
+      /* Construct the message.
+         (Note: The message might need to be split into multiple BLE packets if too long.) */
+      snprintf(msg, sizeof(msg), "PrivTag DS12345 missing for %lu seconds", lostSeconds);
+      updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, strlen(msg), (uint8_t *)msg);
+      printf("BLE msg sent: %s\n", msg);
+    }
+
+    /* Process BLE events if available */
+    if (HAL_GPIO_ReadPin(BLE_INT_GPIO_Port, BLE_INT_Pin))
+    {
+      catchBLE();
+    }
+
+    HAL_Delay(50);
+  }
+}
+
+/*
+   The following functions (SystemClock_Config, MX_SPI3_Init, MX_GPIO_Init, Error_Handler)
+   should not be redefined here if they are already defined in ble.c.
+   If they are not defined in ble.c, then include their definitions here.
+*/

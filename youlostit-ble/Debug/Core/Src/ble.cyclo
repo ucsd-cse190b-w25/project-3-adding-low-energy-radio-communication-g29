@@ -10,4 +10,4 @@
 ../Core/Src/ble.c:323:7:addCharacteristic	2
 ../Core/Src/ble.c:337:7:updateCharValue	1
 ../Core/Src/ble.c:360:7:disconnectBLE	6
-../Core/Src/ble.c:388:7:setDiscoverability	3
+../Core/Src/ble.c:385:7:setDiscoverability	4

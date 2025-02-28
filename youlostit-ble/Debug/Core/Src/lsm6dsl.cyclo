@@ -1,0 +1,4 @@
+../Core/Src/lsm6dsl.c:14:16:lsm6dsl_write_reg	1
+../Core/Src/lsm6dsl.c:23:16:lsm6dsl_read_reg	2
+../Core/Src/lsm6dsl.c:34:6:lsm6dsl_init	5
+../Core/Src/lsm6dsl.c:79:6:lsm6dsl_read_xyz	3

@@ -1,0 +1,170 @@
+#include "main.h"   // Must be included first to provide HAL, CMSIS, and SPI_HandleTypeDef definitions
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stm32l475xx.h>
+
+#include "ble.h"      // BLE stack and ACI commands
+#include "leds.h"     // LED driver (unused in lost mode here)
+#include "timer.h"    // Timer driver
+#include "i2c.h"      // I2C driver for accelerometer
+#include "lsm6dsl.h"  // Accelerometer driver
+
+/* Define global variable required by other modules */
+int dataAvailable = 0;
+
+/* Declare SPI handle needed by BLE functions */
+SPI_HandleTypeDef hspi3;
+
+/* Tag name to include in BLE message (update as needed) */
+#define TAG_NAME "Tag001"
+
+/* Lost mode detection parameters */
+#define MOVEMENT_THRESHOLD    1200   // Maximum difference in accelerometer readings to consider the device as "static"
+#define LOST_MODE_THRESHOLD   600    // Number of consecutive static samples (~60 seconds if loop delay is ~100ms)
+#define BLE_MSG_INTERVAL      10000  // 10,000 ms = 10 seconds between BLE messages
+
+/* Global variables for lost-mode detection */
+volatile uint8_t lost_mode = 0;   // 0: normal mode, 1: lost mode
+uint32_t static_count = 0;        // Counter for consecutive static samples
+uint32_t lost_start_time = 0;     // Time (in ms) when lost mode was entered
+uint32_t bleMessageTimer = 0;     // Timer for BLE message transmission
+
+/* Accelerometer reading variables */
+int16_t ax, ay, az;                    // Current readings
+int16_t prev_ax, prev_ay, prev_az;       // Previous readings
+
+/*
+ * TIM2 IRQ handler:
+ * We disable any LED beacon when in lost mode.
+ * (In this integration, the LEDs remain off.)
+ */
+void TIM2_IRQHandler(void)
+{
+    if (TIM2->SR & TIM_SR_UIF)
+    {
+        TIM2->SR &= ~TIM_SR_UIF; // Clear update flag
+        // Simply turn off LEDs (we use BLE messaging in lost mode)
+        leds_set(0);
+    }
+}
+
+/* Redirect printf output via ITM for debugging */
+int _write(int file, char *ptr, int len)
+{
+    for (int i = 0; i < len; i++)
+    {
+        ITM_SendChar(*ptr++);
+    }
+    return len;
+}
+
+int main(void)
+{
+    uint32_t currentTime;
+    uint32_t lostDurationSeconds;
+    char msg[64];
+
+    /* MCU and HAL Initialization */
+    HAL_Init();
+    SystemClock_Config();
+
+    /* Initialize peripherals required by the BLE stack */
+    MX_GPIO_Init();
+    MX_SPI3_Init();
+
+    /* Reset BLE module */
+    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+
+    /* Initialize BLE stack */
+    ble_init();
+    HAL_Delay(10);
+
+    /* Initialize PrivTag modules */
+    leds_init();            // Initialize LED hardware (not used once BLE messaging is active)
+    timer_init(TIM2);       // Initialize TIM2 for periodic interrupts (here it simply turns off LEDs)
+    timer_set_ms(TIM2, 50); // Set TIM2 period to 50 ms
+    i2c_init();             // Initialize I2C
+    lsm6dsl_init();         // Initialize LSM6DSL accelerometer
+
+    /* Get an initial accelerometer reading */
+    lsm6dsl_read_xyz(&prev_ax, &prev_ay, &prev_az);
+
+    printf("PrivTag BLE application started. Monitoring movement...\n");
+
+    /* Initialize BLE message timer */
+    bleMessageTimer = HAL_GetTick();
+
+    /* Main loop */
+    while (1)
+    {
+        currentTime = HAL_GetTick();
+
+        /* Lost Mode Detection */
+        lsm6dsl_read_xyz(&ax, &ay, &az);
+
+        // Compute absolute differences between current and previous readings
+        int diff_x = (ax >= prev_ax) ? (ax - prev_ax) : (prev_ax - ax);
+        int diff_y = (ay >= prev_ay) ? (ay - prev_ay) : (prev_ay - ay);
+        int diff_z = (az >= prev_az) ? (az - prev_az) : (prev_az - az);
+
+        if ((diff_x < MOVEMENT_THRESHOLD) &&
+            (diff_y < MOVEMENT_THRESHOLD) &&
+            (diff_z < MOVEMENT_THRESHOLD))
+        {
+            static_count++;
+        }
+        else
+        {
+            static_count = 0;
+            // On movement, exit lost mode
+            lost_mode = 0;
+            nonDiscoverable = 1;
+            lost_start_time = 0;
+        }
+
+        // If static for sufficient consecutive samples, enter lost mode
+        if (static_count >= LOST_MODE_THRESHOLD)
+        {
+            lost_mode = 1;
+            nonDiscoverable = 0; // Allow BLE connections
+            if (lost_start_time == 0)
+            {
+                lost_start_time = currentTime;
+                bleMessageTimer = currentTime;
+            }
+        }
+
+        // Update previous accelerometer readings
+        prev_ax = ax;
+        prev_ay = ay;
+        prev_az = az;
+
+        /* BLE Event Processing */
+        if (!nonDiscoverable && HAL_GPIO_ReadPin(BLE_INT_GPIO_Port, BLE_INT_Pin))
+        {
+            catchBLE();
+        }
+
+        /* BLE Messaging in Lost Mode */
+        if (lost_mode && (currentTime - bleMessageTimer >= BLE_MSG_INTERVAL))
+        {
+            lostDurationSeconds = (currentTime - lost_start_time) / 1000;
+            sprintf(msg, "PrivTag %s missing for %lus", TAG_NAME, (unsigned int)lostDurationSeconds);
+            updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, strlen(msg), (uint8_t *)msg);
+            bleMessageTimer = currentTime;
+            printf("BLE Message Sent: %s\n", msg);
+        }
+
+        /* Optional debug output */
+        printf("Accel: X=%d, Y=%d, Z=%d, lost_mode=%d, static_count=%lu\n",
+               ax, ay, az, lost_mode, static_count);
+
+        HAL_Delay(100); // Approximately 100ms delay per loop iteration
+    }
+
+    return 0;
+}
