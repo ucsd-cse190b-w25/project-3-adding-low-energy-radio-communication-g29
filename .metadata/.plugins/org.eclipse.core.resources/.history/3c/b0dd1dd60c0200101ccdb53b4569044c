@@ -1,0 +1,50 @@
+#include "rtc.h"
+
+RTC_HandleTypeDef hrtc;
+
+void RTC_Init(void)
+{
+    /* Configure RTC instance.
+       Assumes that the RTC clock (e.g., LSE) is already available. */
+    hrtc.Instance = RTC;
+    hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+    hrtc.Init.AsynchPrediv = 127;   // For a 32.768 kHz clock (adjust as needed)
+    hrtc.Init.SynchPrediv = 255;
+    hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+    if (HAL_RTC_Init(&hrtc) != HAL_OK)
+    {
+        /* Initialization error; stay here */
+        while (1);
+    }
+
+    /* Configure NVIC for RTC Wakeup interrupt */
+    HAL_NVIC_SetPriority(RTC_WKUP_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(RTC_WKUP_IRQn);
+}
+
+HAL_StatusTypeDef RTC_Start(uint32_t wakeupCounter)
+{
+    /* Start the RTC wakeup timer in interrupt mode using the DIV16 clock.
+       For example, with a 32.768 kHz clock and DIV16, each tick is ~0.488ms.
+       A counter value of 102 gives ~50ms (102 * 16/32768 ≈ 0.0498 sec). */
+    return HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, wakeupCounter, RTC_WAKEUPCLOCK_RTCCLK_DIV16);
+}
+
+void RTC_Stop(void)
+{
+    HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
+}
+
+/* RTC Wakeup IRQ Handler.
+   This handler is called when the wakeup timer expires. */
+void RTC_WKUP_IRQHandler(void)
+{
+    HAL_RTCEx_WakeUpTimerIRQHandler(&hrtc);
+}
+
+/* Optional: RTC wakeup callback (called by HAL after wakeup interrupt).
+   No extra processing is needed here since waking from STOP2 mode is sufficient. */
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc)
+{
+    /* Intentionally left empty */
+}

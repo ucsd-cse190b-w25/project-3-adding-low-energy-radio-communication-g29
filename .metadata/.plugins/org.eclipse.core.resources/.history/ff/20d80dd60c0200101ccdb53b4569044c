@@ -1,0 +1,18 @@
+#ifndef RTC_H
+#define RTC_H
+
+#include "stm32l4xx_hal.h"
+
+/* Initialize the RTC peripheral and configure LSE as clock source */
+void RTC_Init(void);
+
+/* Start the RTC wakeup timer in interrupt mode.
+ * period_ms: wakeup period in milliseconds.
+ * Returns HAL_OK on success.
+ */
+HAL_StatusTypeDef RTC_StartWakeUp(uint32_t period_ms);
+
+/* Stop (deactivate) the RTC wakeup timer */
+void RTC_StopWakeUp(void);
+
+#endif /* RTC_H */

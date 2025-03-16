@@ -1,0 +1,69 @@
+#include "lptim.h"
+
+/**
+  * @brief  Initialize the LPTIM peripheral.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @retval HAL status
+  */
+HAL_StatusTypeDef HAL_LPTIM_Init(LPTIM_HandleTypeDef *hlptim)
+{
+    if (hlptim == NULL)
+    {
+        return HAL_ERROR;
+    }
+    /* Reset internal state; in a full driver, you’d also configure hardware registers */
+    hlptim->Started = 0;
+    return HAL_OK;
+}
+
+/**
+  * @brief  Start the LPTIM in timeout mode with interrupts.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @param  period: timer period value.
+  * @param  timeout: compare match value.
+  * @retval HAL status
+  */
+HAL_StatusTypeDef HAL_LPTIM_TimeOut_Start_IT(LPTIM_HandleTypeDef *hlptim, uint32_t period, uint32_t timeout)
+{
+    if (hlptim == NULL)
+    {
+        return HAL_ERROR;
+    }
+    /* Store the configuration values */
+    hlptim->Period = period;
+    hlptim->Timeout = timeout;
+    hlptim->Started = 1;
+
+    /* In a full implementation, here you would:
+         - Configure the LPTIM registers (e.g., set period, prescaler, etc.)
+         - Enable the compare match interrupt.
+         - Start the LPTIM counter.
+    */
+    return HAL_OK;
+}
+
+/**
+  * @brief  LPTIM interrupt handler.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @note   In an actual driver, you would check and clear the hardware interrupt flags.
+  */
+void HAL_LPTIM_IRQHandler(LPTIM_HandleTypeDef *hlptim)
+{
+    if (hlptim && hlptim->Started)
+    {
+        /* For this minimal implementation, assume a compare match event occurred.
+           In a real driver, add code to check the flag and clear it. */
+        HAL_LPTIM_CompareMatchCallback(hlptim);
+    }
+}
+
+/**
+  * @brief  Compare match callback.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @note   This is a weak function and can be overridden by user code.
+  */
+__attribute__((weak)) void HAL_LPTIM_CompareMatchCallback(LPTIM_HandleTypeDef *hlptim)
+{
+    /* Default implementation does nothing.
+       Override this in your application if needed. */
+}

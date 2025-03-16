@@ -1,0 +1,4 @@
+../Core/Src/rtc.c:13:19:RTC_Init	16	static
+../Core/Src/rtc.c:60:19:RTC_Start	16	static
+../Core/Src/rtc.c:92:6:RTC_Stop	4	static
+../Core/Src/rtc.c:109:6:RTC_WKUP_IRQHandler	4	static

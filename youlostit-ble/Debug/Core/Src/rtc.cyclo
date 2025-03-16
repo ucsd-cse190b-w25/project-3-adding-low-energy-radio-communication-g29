@@ -1,0 +1,4 @@
+../Core/Src/rtc.c:13:19:RTC_Init	3
+../Core/Src/rtc.c:60:19:RTC_Start	2
+../Core/Src/rtc.c:92:6:RTC_Stop	1
+../Core/Src/rtc.c:109:6:RTC_WKUP_IRQHandler	2

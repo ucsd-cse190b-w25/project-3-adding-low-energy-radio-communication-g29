@@ -1,0 +1,97 @@
+#include "lptim.h"
+
+/* Minimal register bit definitions for LPTIM.
+   (Adjust these definitions based on your MCU’s reference manual.) */
+#define LPTIM_CR_ENABLE      (1U << 0)
+#define LPTIM_CR_SNGSTRT     (1U << 1)
+
+#define LPTIM_IER_CMPMIE     (1U << 1)
+
+#define LPTIM_ISR_CMPM       (1U << 1)
+#define LPTIM_ICR_CMPMCF     (1U << 1)
+
+/**
+  * @brief  Initialize the LPTIM peripheral.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @retval HAL status
+  */
+HAL_StatusTypeDef HAL_LPTIM_Init(LPTIM_HandleTypeDef *hlptim)
+{
+    if (hlptim == NULL)
+    {
+        return HAL_ERROR;
+    }
+    /* Reset internal state and disable the timer */
+    hlptim->Started = 0;
+    hlptim->Instance->CR &= ~LPTIM_CR_ENABLE;
+    return HAL_OK;
+}
+
+/**
+  * @brief  Start the LPTIM in timeout (single-shot) mode with interrupts.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @param  period: auto-reload value (timer period).
+  * @param  timeout: compare match value.
+  * @retval HAL status
+  */
+HAL_StatusTypeDef HAL_LPTIM_TimeOut_Start_IT(LPTIM_HandleTypeDef *hlptim, uint32_t period, uint32_t timeout)
+{
+    if (hlptim == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    /* Set the auto-reload register (timer period) and compare register (timeout) */
+    hlptim->Instance->ARR = period;
+    hlptim->Instance->CMP = timeout;
+
+    /* (Optional) Configure the CFGR register using Init values.
+       For a full implementation, you would set the prescaler, clock source, etc.
+       Here we assume the defaults are acceptable for low-power operation. */
+    // hlptim->Instance->CFGR = ... (configure using hlptim->Init)
+
+    /* Enable the compare match interrupt */
+    hlptim->Instance->IER |= LPTIM_IER_CMPMIE;
+
+    /* Enable the LPTIM peripheral */
+    hlptim->Instance->CR |= LPTIM_CR_ENABLE;
+
+    /* Start the timer in single-shot mode */
+    hlptim->Instance->CR |= LPTIM_CR_SNGSTRT;
+
+    hlptim->Started = 1;
+
+    return HAL_OK;
+}
+
+/**
+  * @brief  LPTIM interrupt handler.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @note   Checks if a compare match event occurred, clears the flag, and invokes the callback.
+  */
+void HAL_LPTIM_IRQHandler(LPTIM_HandleTypeDef *hlptim)
+{
+    if (hlptim && hlptim->Started)
+    {
+        /* Check if compare match flag is set */
+        if (hlptim->Instance->ISR & LPTIM_ISR_CMPM)
+        {
+            /* Clear the compare match flag */
+            hlptim->Instance->ICR |= LPTIM_ICR_CMPMCF;
+
+            /* Call the compare-match callback to notify the application */
+            HAL_LPTIM_CompareMatchCallback(hlptim);
+        }
+    }
+}
+
+/**
+  * @brief  Compare match callback.
+  * @param  hlptim: pointer to a LPTIM handle structure.
+  * @note   This weak function can be overridden by user code.
+  */
+__attribute__((weak)) void HAL_LPTIM_CompareMatchCallback(LPTIM_HandleTypeDef *hlptim)
+{
+    /* Default implementation does nothing.
+       Override this in your application if you need to take action upon wake-up. */
+}

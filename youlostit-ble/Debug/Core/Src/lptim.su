@@ -1,0 +1,4 @@
+../Core/Src/lptim.c:18:19:HAL_LPTIM_Init	16	static
+../Core/Src/lptim.c:37:19:HAL_LPTIM_TimeOut_Start_IT	24	static
+../Core/Src/lptim.c:72:6:HAL_LPTIM_IRQHandler	16	static
+../Core/Src/lptim.c:93:28:HAL_LPTIM_CompareMatchCallback	16	static

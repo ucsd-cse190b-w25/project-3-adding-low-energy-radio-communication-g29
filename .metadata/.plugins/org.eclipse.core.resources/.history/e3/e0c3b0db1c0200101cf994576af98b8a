@@ -1,0 +1,71 @@
+#ifndef LPTIM_H
+#define LPTIM_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "stm32l4xx_hal.h"
+
+/* Provide definitions if not already defined */
+#ifndef LPTIM_CLOCKSOURCE_ULPTIM
+#define LPTIM_CLOCKSOURCE_ULPTIM     0x00000001U
+#endif
+
+#ifndef LPTIM_PRESCALER_DIV1
+#define LPTIM_PRESCALER_DIV1         0x00000001U
+#endif
+
+#ifndef LPTIM_TRIGSOURCE_SOFTWARE
+#define LPTIM_TRIGSOURCE_SOFTWARE    0x00000001U
+#endif
+
+#ifndef LPTIM_OUTPUTPOLARITY_HIGH
+#define LPTIM_OUTPUTPOLARITY_HIGH    0x00000001U
+#endif
+
+#ifndef LPTIM_UPDATE_IMMEDIATE
+#define LPTIM_UPDATE_IMMEDIATE       0x00000001U
+#endif
+
+#ifndef LPTIM_COUNTERSOURCE_INTERNAL
+#define LPTIM_COUNTERSOURCE_INTERNAL 0x00000001U
+#endif
+
+/* Define an initialization structure for LPTIM settings */
+typedef struct {
+    uint32_t ClockSource;
+    uint32_t Prescaler;
+    uint32_t TriggerSource;
+    uint32_t OutputPolarity;
+    uint32_t UpdateMode;
+    uint32_t CounterSource;
+} LPTIM_InitTypeDef;
+
+/* Define the LPTIM handle structure if not already defined.
+   Note: The device header already defines LPTIM_TypeDef. */
+#ifndef CUSTOM_LPTIM_HANDLE_DEFINED
+#define CUSTOM_LPTIM_HANDLE_DEFINED
+typedef struct {
+    LPTIM_TypeDef *Instance;  /*!< Base address of LPTIM registers */
+    LPTIM_InitTypeDef Init;   /*!< LPTIM required parameters */
+    uint32_t Period;          /*!< Configured period (counts) */
+    uint32_t Timeout;         /*!< Configured timeout (counts) */
+    uint8_t  Started;         /*!< Flag indicating timer has started */
+} LPTIM_HandleTypeDef;
+#endif
+
+/* Function prototypes */
+HAL_StatusTypeDef HAL_LPTIM_Init(LPTIM_HandleTypeDef *hlptim);
+HAL_StatusTypeDef HAL_LPTIM_TimeOut_Start_IT(LPTIM_HandleTypeDef *hlptim, uint32_t period, uint32_t timeout);
+void HAL_LPTIM_IRQHandler(LPTIM_HandleTypeDef *hlptim);
+
+/* Weak callback that can be overridden by user code.
+   Called when a compare match (timeout) event occurs. */
+__weak void HAL_LPTIM_CompareMatchCallback(LPTIM_HandleTypeDef *hlptim);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LPTIM_H */

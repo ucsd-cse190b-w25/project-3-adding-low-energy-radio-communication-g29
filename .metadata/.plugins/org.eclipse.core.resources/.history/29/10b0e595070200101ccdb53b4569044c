@@ -1,0 +1,340 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body (low-power STOP2 mode with RTC wakeup)
+  ******************************************************************************
+  * @attention
+  *
+  * This version consolidates interrupt handling to the RTC wakeup interrupt.
+  * It uses the RTC wakeup timer to exit STOP2 mode periodically (every ~50ms),
+  * so the system can perform sensor readings and BLE lost-mode processing.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "stm32l4xx_hal.h"
+#include "stm32l4xx_hal_rtc.h"   // RTC header
+
+#include "leds.h"
+#include "i2c.h"
+#include "lsm6dsl.h"
+#include "ble.h"
+
+/* Global peripheral handles */
+SPI_HandleTypeDef hspi3;
+RTC_HandleTypeDef hrtc;
+
+/* Application state */
+#define MOVEMENT_THRESHOLD    1200
+#define LOST_MODE_THRESHOLD   600    // 200 consecutive static samples (~30 seconds)
+#define MESSAGE_INTERVAL_COUNT 100   // 100 iterations (~10 seconds per message)
+
+uint32_t static_count = 0;
+volatile uint8_t lost_mode = 0;
+uint32_t message_timer = 0;
+uint32_t lost_seconds = 0;
+
+int16_t ax, ay, az;
+int16_t prev_ax, prev_ay, prev_az;
+
+#define BLE_MAX_PACKET_SIZE 20
+
+/* Function prototypes */
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_SPI3_Init(void);
+static void MX_RTC_Init(void);
+
+int _write(int file, char *ptr, int len)
+{
+  for (int i = 0; i < len; i++)
+  {
+    ITM_SendChar(*ptr++);
+  }
+  return len;
+}
+
+/* RTC Wakeup Interrupt Handler: Wakes the MCU periodically from STOP2 mode */
+void RTC_WKUP_IRQHandler(void)
+{
+  HAL_RTCEx_WakeUpTimerIRQHandler(&hrtc);
+}
+
+/* RTC Wakeup Timer Callback */
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc)
+{
+  /* No additional action required here – the wakeup event simply exits STOP2 mode */
+}
+
+/* BLE message sending function */
+void sendBleMessage(uint32_t secondsMissing)
+{
+  char fullMessage[64];
+  snprintf(fullMessage, sizeof(fullMessage), "PrivTag DS12345 lost for %lu sec", secondsMissing);
+
+  int messageLength = strlen(fullMessage);
+  int bytesSent = 0;
+
+  printf("[BLE] Sending message: %s\n", fullMessage);
+
+  while (bytesSent < messageLength)
+  {
+    int chunkSize = (messageLength - bytesSent) > BLE_MAX_PACKET_SIZE ? BLE_MAX_PACKET_SIZE : (messageLength - bytesSent);
+    printf("[BLE] Sending chunk: %.*s\n", chunkSize, &fullMessage[bytesSent]);
+
+    updateCharValue(NORDIC_UART_SERVICE_HANDLE, READ_CHAR_HANDLE, 0, chunkSize, (uint8_t *)&fullMessage[bytesSent]);
+    bytesSent += chunkSize;
+    HAL_Delay(50);  // Prevent BLE flooding
+  }
+}
+
+int main(void)
+{
+  /* Reset of all peripherals, initialize the Flash interface and the Systick. */
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_SPI3_Init();
+
+  /* Initialize application peripherals */
+  leds_init();
+  i2c_init();
+  lsm6dsl_init();
+
+  /* Read initial accelerometer data */
+  lsm6dsl_read_xyz(&prev_ax, &prev_ay, &prev_az);
+
+  /* Initialize RTC and its wakeup timer for a ~50ms period.
+     For a 32.768 kHz LSE clock, 50ms corresponds roughly to 1638 counts. */
+  MX_RTC_Init();
+  if(HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 1638, RTC_WAKEUPCLOCK_CK_SPRE_16BITS) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  printf("DS12345 PrivTag started. Monitoring movement...\n");
+
+  while (1)
+  {
+    /* Enter STOP2 mode to save power. The MCU will wake upon the RTC wakeup interrupt.
+       (Note: Upon wake-up from STOP2 mode, the system clock may need re-configuration.) */
+    HAL_PWREx_EnterSTOP2Mode(PWR_STOPENTRY_WFI);
+    SystemClock_Config();  // Re-configure system clock after waking up
+
+    /* Clear the RTC wakeup flag */
+    __HAL_RTC_WAKEUPTIMER_CLEAR_FLAG(&hrtc, RTC_FLAG_WUTF);
+
+    /* Re-enable the wakeup timer for the next iteration */
+    if(HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 1638, RTC_WAKEUPCLOCK_CK_SPRE_16BITS) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Main loop tasks (executed every ~50ms) */
+    lsm6dsl_read_xyz(&ax, &ay, &az);
+    int diff_x = abs(ax - prev_ax);
+    int diff_y = abs(ay - prev_ay);
+    int diff_z = abs(az - prev_az);
+
+    /* Check for static condition */
+    if (diff_x < MOVEMENT_THRESHOLD && diff_y < MOVEMENT_THRESHOLD && diff_z < MOVEMENT_THRESHOLD)
+    {
+      static_count++;
+    }
+    else
+    {
+      /* Movement detected: if in lost mode, exit it */
+      if (lost_mode)
+      {
+        printf("[LOST MODE] Movement detected: Exiting lost mode.\n");
+
+        lost_mode = 0;
+        static_count = 0;
+        message_timer = 0;
+        lost_seconds = 0;
+
+        /* Force BLE to disconnect and disable advertisements */
+        printf("[BLE] Disconnecting and making non-discoverable...\n");
+        disconnectBLE();
+        HAL_Delay(100);
+        setDiscoverability(0);
+        HAL_Delay(100);
+        HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET);
+        HAL_Delay(500);
+        HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+        HAL_Delay(500);
+
+        printf("[BLE] BLE module completely shut down.\n");
+      }
+    }
+
+    /* Enter Lost Mode if static for long enough */
+    if (static_count >= LOST_MODE_THRESHOLD)
+    {
+      if (!lost_mode)
+      {
+        lost_mode = 1;
+        printf("[BLE] Initializing BLE (Entering Lost Mode)...\n");
+
+        /* Reset and initialize BLE */
+        HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_RESET);
+        HAL_Delay(500);
+        HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+        HAL_Delay(500);
+
+        ble_init();
+        HAL_Delay(100);
+        setDiscoverability(1);
+        HAL_Delay(100);
+        setConnectable();
+
+        printf("[LOST MODE] BLE is now connectable.\n");
+      }
+    }
+
+    /* If in lost mode, send a BLE message every ~10 seconds */
+    if (lost_mode)
+    {
+      message_timer++;
+      if (message_timer >= MESSAGE_INTERVAL_COUNT)
+      {
+        lost_seconds += 10;
+        sendBleMessage(lost_seconds);
+        message_timer = 0;
+      }
+    }
+    prev_ax = ax;
+    prev_ay = ay;
+    prev_az = az;
+
+    printf("[STATUS] Accel: X=%d, Y=%d, Z=%d, static_count=%lu, lost_mode=%d, lost_seconds=%lu\n",
+           ax, ay, az, static_count, lost_mode, lost_seconds);
+  }
+
+  return 0;
+}
+
+/* System Clock Configuration */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
+  RCC_OscInitStruct.MSICalibrationValue = 0;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_7;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* SPI3 Initialization */
+static void MX_SPI3_Init(void)
+{
+  hspi3.Instance = SPI3;
+  hspi3.Init.Mode = SPI_MODE_MASTER;
+  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi3.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi3.Init.NSS = SPI_NSS_SOFT;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi3.Init.CRCPolynomial = 7;
+  hspi3.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi3.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  if (HAL_SPI_Init(&hspi3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* GPIO Initialization */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /* Configure output pins for LED and BLE reset */
+  GPIO_InitStruct.Pin = GPIO_LED1_Pin | BLE_RESET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* Configure BLE_CS pin as output */
+  GPIO_InitStruct.Pin = BLE_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(BLE_CS_GPIO_Port, &GPIO_InitStruct);
+
+  HAL_GPIO_WritePin(BLE_CS_GPIO_Port, BLE_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(BLE_RESET_GPIO_Port, BLE_RESET_Pin, GPIO_PIN_SET);
+}
+
+/* RTC Initialization */
+static void MX_RTC_Init(void)
+{
+  /* Enable the RTC peripheral clock */
+  __HAL_RCC_RTC_ENABLE();
+
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;    // Example values; adjust based on your RTC clock source
+  hrtc.Init.SynchPrediv = 255;     // Typically set for a 32.768 kHz LSE clock.
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* Enable the RTC Wakeup Interrupt */
+  HAL_NVIC_SetPriority(RTC_WKUP_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(RTC_WKUP_IRQn);
+}
+
+/* Error Handler */
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
